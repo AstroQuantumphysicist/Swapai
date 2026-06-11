@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 
-from textual import work
+from textual import events, work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
@@ -73,6 +73,23 @@ def _human(n: float) -> str:
     return f"{n:.0f}"
 
 
+def _relative_time(epoch: float) -> str:
+    """Format an epoch as a compact countdown for dashboard cards."""
+    if not epoch:
+        return "unknown"
+    seconds = max(0, int(epoch - time.time()))
+    if seconds < 60:
+        return "<1m"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m"
+    hours, minutes = divmod(minutes, 60)
+    if hours < 48:
+        return f"{hours}h {minutes:02d}m"
+    days, hours = divmod(hours, 24)
+    return f"{days}d {hours}h"
+
+
 _SPARK = "▁▂▃▄▅▆▇█"
 _SPARK_COLORS = ["#475569", "#0891b2", "#06b6d4", "#22d3ee",
                  "#67e8f9", "#a5f3fc", "#fbbf24", "#f97316"]
@@ -90,12 +107,32 @@ def _sparkline(series: list[int], width: int = 48) -> str:
     return "".join(out)
 
 
-def _meter(percent_left: float, width: int = 10) -> str:
-    """Colored remaining-limit meter."""
-    left = max(0.0, min(100.0, percent_left))
-    color = "#4ade80" if left > 50 else "#facc15" if left > 15 else "#f87171"
-    n = round(left / 100 * width)
-    return f"[{color}]{'█' * n}[/][#334155]{'░' * (width - n)}[/] [{color}]{left:.0f}%[/]"
+class ConfirmDeleteModal(ModalScreen[bool]):
+    """Require confirmation before removing account credentials."""
+
+    BINDINGS = [("escape", "dismiss(False)", "Cancel")]
+
+    def __init__(self, email: str) -> None:
+        super().__init__()
+        self.email = email
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="confirm-box"):
+            yield Label(
+                "[b #f87171]Remove account?[/b #f87171]",
+                id="confirm-title",
+            )
+            yield Label(
+                f"This removes [b]{self.email}[/b] from this device.\n"
+                "You can connect it again later.",
+                id="confirm-copy",
+            )
+            with Horizontal(id="confirm-buttons"):
+                yield Button("Cancel", id="cancel-delete")
+                yield Button("Remove account", id="confirm-delete", variant="error")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "confirm-delete")
 
 
 class ApiKeyModal(ModalScreen[str]):
@@ -156,6 +193,7 @@ class SwapAIApp(App):
                 yield Static(id="server-card")
                 yield DataTable(id="accounts-table", zebra_stripes=True,
                                 cursor_type="row")
+                yield Static(id="account-details")
             with Vertical(id="center"):
                 yield Static(id="hero")
                 with Horizontal(id="tiles"):
@@ -169,8 +207,13 @@ class SwapAIApp(App):
                     yield Static(id="capacity-card")
             with Vertical(id="right"):
                 yield RichLog(id="log", highlight=True, markup=True,
-                              max_lines=300)
+                              max_lines=300, wrap=True)
         yield Footer()
+
+    def on_resize(self, event: events.Resize) -> None:
+        """Adapt the three-column dashboard to the available terminal."""
+        self.screen.set_class(event.size.width <= 140, "compact")
+        self.screen.set_class(event.size.width <= 92, "narrow")
 
     def on_mount(self) -> None:
         try:
@@ -181,6 +224,7 @@ class SwapAIApp(App):
         titles = {
             "#server-card": " ⚡ SERVER ",
             "#accounts-table": " 👤 ACCOUNTS ",
+            "#account-details": " ◎ SELECTED ACCOUNT ",
             "#hero": " ◆ TOTAL TOKENS PROCESSED ",
             "#spark-card": " 〜 THROUGHPUT · 60 MIN ",
             "#models-card": " ◇ BY MODEL · 24H ",
@@ -193,8 +237,10 @@ class SwapAIApp(App):
             except Exception:
                 pass
         table = self.query_one("#accounts-table", DataTable)
-        table.add_columns("", "Account", "Plan", "5h left", "Wk left",
-                          "Learned caps")
+        table.add_column("Account", width=16)
+        table.add_column("Plan", width=5)
+        table.add_column("5h", width=4)
+        table.add_column("Wk", width=4)
         self.log_line("[bold cyan]SwapAI online.[/bold cyan]")
         self.log_line(f"[dim]data dir: {usage.data_dir()}[/dim]")
         self.log_line("[dim]a[/dim] add account · [dim]s[/dim] start server"
@@ -203,6 +249,14 @@ class SwapAIApp(App):
             self.log_line("[yellow]⚠ No API key — server would be OPEN. "
                           "Press k.[/yellow]")
         self.refresh_views()
+        if accounts.list_accounts():
+            try:
+                self.server.start()
+                self.log_line(
+                    f"[#4ade80]▶ API auto-started at http://"
+                    f"{self.server.host}:{self.server.port}/v1[/]")
+            except Exception as exc:  # noqa: BLE001
+                self.log_line(f"[red]API startup failed: {exc}[/red]")
         # Re-render the dashboard 2×/sec for sparkline + timers.
         self.set_interval(2, self.refresh_views)
         # Periodically refresh rate-limit headers from the backend so the
@@ -228,8 +282,8 @@ class SwapAIApp(App):
             router.reload()
         except Exception:
             pass
-        for fn in (self._render_accounts, self._render_server_card,
-                   self._render_dashboard):
+        for fn in (self._render_accounts, self._render_account_details,
+                   self._render_server_card, self._render_dashboard):
             try:
                 fn()
             except Exception as exc:  # noqa: BLE001
@@ -237,42 +291,117 @@ class SwapAIApp(App):
 
     def _render_accounts(self) -> None:
         table = self.query_one("#accounts-table", DataTable)
+        # Preserve selection while the live dashboard refreshes.
+        selected_id = None
+        try:
+            selected_id = table.coordinate_to_cell_key(
+                table.cursor_coordinate).row_key.value
+        except Exception:
+            pass
         table.clear()
         accs = router.accounts
+        selected_row = 0
         for i, a in enumerate(accs):
             active = i == router.active_index and not a.is_rate_limited
             marker = ("[#4ade80]▶[/]" if active else
                       "[#f87171]■[/]" if a.is_rate_limited else
                       "[#64748b]·[/]")
-            cap5 = (
-                f"{_human(a.learned_tokens_per_5h)} "
-                f"({_human(a.learned_tokens_per_5h * a.primary.remaining_percent / 100)} left)"
-                if a.learned_tokens_per_5h > 0 else "learning")
-            capw = (
-                f"{_human(a.learned_tokens_per_week)} "
-                f"({_human(a.learned_tokens_per_week * a.secondary.remaining_percent / 100)} left)"
-                if a.learned_tokens_per_week > 0 else "learning")
-            cap = f"[#4ade80]5h {cap5} / wk {capw}[/]"
             # Show the meter whenever we have *any* primary data; the
             # backend sometimes sends used_percent without window_minutes.
             has_prim = (a.primary.used_percent > 0
                         or a.primary.window_minutes > 0)
             has_sec = (a.secondary.used_percent > 0
                        or a.secondary.window_minutes > 0)
-            prim = (_meter(a.primary.remaining_percent, 8)
-                    if has_prim else "[dim]probing…[/dim]")
-            sec = (_meter(a.secondary.remaining_percent, 8)
-                   if has_sec else "[dim]—[/dim]")
-            table.add_row(marker, a.email[:20], a.plan or "?", prim, sec,
-                          cap, key=a.id)
-        if not accs:
-            table.add_row("", "[dim]none — press a to login[/dim]", "", "",
-                          "", "")
+            def percent(value: float, available: bool) -> str:
+                if not available:
+                    return "[dim]—[/dim]"
+                color = ("#4ade80" if value > 50 else
+                         "#facc15" if value > 15 else "#f87171")
+                return f"[{color}]{value:.0f}%[/]"
+
+            prim = percent(a.primary.remaining_percent, has_prim)
+            sec = percent(a.secondary.remaining_percent, has_sec)
+            status = " [#f87171]![/]" if a.last_error else ""
+            # Keep the table narrow enough that it never needs a horizontal
+            # scrollbar. Preserve both ends of longer email addresses.
+            email = a.email
+            if len(email) > 13:
+                email = f"{email[:6]}…{email[-6:]}"
+            account_name = f"{marker} {email}{status}"
+            table.add_row(account_name, a.plan or "—", prim, sec, key=a.id)
+            if a.id == selected_id:
+                selected_row = i
+        if accs:
+            table.move_cursor(row=selected_row)
+        else:
+            table.add_row("[b]No accounts connected[/b]", "", "", "")
+            table.add_row(
+                "[dim]Press A to connect an account[/dim]", "", "", ""
+            )
+
+    def _selected_account(self):
+        """Return the highlighted account without exposing table internals."""
+        if not router.accounts:
+            return None
+        try:
+            table = self.query_one("#accounts-table", DataTable)
+            row_id = table.coordinate_to_cell_key(
+                table.cursor_coordinate
+            ).row_key.value
+            return next(a for a in router.accounts if a.id == row_id)
+        except Exception:
+            return router.accounts[0]
+
+    def _render_account_details(self) -> None:
+        account = self._selected_account()
+        card = self.query_one("#account-details", Static)
+        if account is None:
+            card.update(
+                "[dim]Select an account to inspect limits, resets, models, "
+                "and observed capacity.[/dim]"
+            )
+            return
+
+        if account.is_rate_limited:
+            state = "[#f87171 b]RATE LIMITED[/]"
+        elif account.last_error:
+            state = "[#f87171 b]ERROR[/]"
+        else:
+            state = "[#4ade80 b]READY[/]"
+        primary_reset = _relative_time(account.primary.resets_at)
+        weekly_reset = _relative_time(account.secondary.resets_at)
+        cap_5h = (_human(account.learned_tokens_per_5h)
+                  if account.learned_tokens_per_5h else "learning")
+        cap_week = (_human(account.learned_tokens_per_week)
+                    if account.learned_tokens_per_week else "learning")
+        if account.models:
+            preview = ", ".join(account.models[:2])
+            extra = len(account.models) - 2
+            models = f"{preview}{f' +{extra}' if extra > 0 else ''}"
+        else:
+            models = "probing…"
+        error = (
+            f"\n[#f87171]error[/] {account.last_error[:48]}"
+            if account.last_error else ""
+        )
+        card.update(
+            f"{state}  [b]{account.email or 'Unknown account'}[/b]\n"
+            f"[dim]plan[/dim] {account.plan or '—'}   "
+            f"[dim]resets[/dim] 5h {primary_reset} · wk {weekly_reset}\n"
+            f"[dim]capacity[/dim] 5h {cap_5h} · wk {cap_week}\n"
+            f"[dim]models ({len(account.models)})[/dim] {models}{error}"
+        )
+
+    def on_data_table_row_highlighted(
+        self, event: DataTable.RowHighlighted
+    ) -> None:
+        if event.data_table.id == "accounts-table":
+            self._render_account_details()
 
     def _render_server_card(self) -> None:
         key = config.get_api_key()
-        key_disp = (f"[#4ade80]{key[:12]}…[/]" if key
-                    else "[#f87171]not set ⚠[/]")
+        key_disp = ("[#4ade80]● configured[/]" if key
+                    else "[#f87171]● not configured[/]")
         state = ("[#4ade80 b]● RUNNING[/]" if self.server.running
                  else "[#64748b]○ stopped[/]")
         models = router.common_models()
@@ -283,9 +412,9 @@ class SwapAIApp(App):
         card = (
             f"{state}   [dim]up[/dim] {uptime}\n"
             f"[#38bdf8 u]http://{self.server.host}:{self.server.port}/v1[/]\n"
-            f"[dim]key[/dim]     {key_disp}\n"
-            f"[dim]models[/dim]  {models_disp}\n"
-            f"[dim]active[/dim]  "
+            f"[dim]security[/dim] {key_disp}\n"
+            f"[dim]models[/dim]   {models_disp}\n"
+            f"[dim]routing[/dim]  "
             f"#{router.active_index + 1 if router.accounts else 0}"
             f" of {len(router.accounts)} accounts"
         )
@@ -421,19 +550,23 @@ class SwapAIApp(App):
         if not router.accounts:
             return
         try:
-            row_key = table.coordinate_to_cell_key(
-                table.cursor_coordinate).row_key
+            row_id = table.coordinate_to_cell_key(
+                table.cursor_coordinate).row_key.value
+            account = next(a for a in router.accounts if a.id == row_id)
         except Exception:
             return
-        for a in router.accounts:
-            if a.id == row_key.value:
-                try:
-                    a.delete()
-                except Exception:
-                    pass
-                self.log_line(f"[yellow]✕ Removed {a.email}[/yellow]")
-                break
-        self.refresh_views()
+
+        def remove(confirmed: bool) -> None:
+            if not confirmed:
+                return
+            try:
+                account.delete()
+                self.log_line(f"[yellow]✕ Removed {account.email}[/yellow]")
+            except Exception as exc:  # noqa: BLE001
+                self.log_line(f"[red]Could not remove account: {exc}[/red]")
+            self.refresh_views()
+
+        self.push_screen(ConfirmDeleteModal(account.email), remove)
 
     def action_refresh(self) -> None:
         self.log_line("[cyan]↻ Refreshing tokens & limits…[/cyan]")

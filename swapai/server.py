@@ -247,11 +247,20 @@ class ServerThread:
     def __init__(self) -> None:
         self._server: uvicorn.Server | None = None
         self._thread: threading.Thread | None = None
-        self.running = False
         self.host = config.get_host()
         self.port = config.get_port()
 
-    def start(self) -> None:
+    @property
+    def running(self) -> bool:
+        return bool(
+            self._server
+            and self._server.started
+            and not self._server.should_exit
+            and self._thread
+            and self._thread.is_alive()
+        )
+
+    def start(self, timeout: float = 5.0) -> None:
         if self.running:
             return
         self.host = config.get_host()
@@ -262,9 +271,20 @@ class ServerThread:
         self._server.install_signal_handlers = lambda: None
         self._thread = threading.Thread(target=self._server.run, daemon=True)
         self._thread.start()
-        self.running = True
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self.running:
+                return
+            if not self._thread.is_alive():
+                break
+            time.sleep(0.05)
+        self.stop()
+        raise RuntimeError(
+            f"Could not start API server on {self.host}:{self.port}. "
+            "The port may already be in use.")
 
     def stop(self) -> None:
         if self._server:
             self._server.should_exit = True
-        self.running = False
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=5)

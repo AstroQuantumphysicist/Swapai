@@ -1,14 +1,24 @@
+$surface: #131722;
+$surface-raised: #171c2b;
+$border: #293248;
+$muted: #77829a;
+$accent: #38bdf8;
+
 Screen {
-    background: #0f1117;
+    background: #0c1018;
+    color: #d8deed;
 }
 
 Header {
-    background: #131726;
+    background: #111725;
     color: #7dd3fc;
+    border-bottom: solid #202a40;
 }
 
 Footer {
-    background: #131726;
+    background: #111725;
+    color: #aab4ca;
+    border-top: solid #202a40;
 }
 
 #main {
@@ -17,7 +27,7 @@ Footer {
 
 /* ---- left control column ---- */
 #left {
-    width: 49;
+    width: 54;
     padding: 1 1 0 2;
 }
 
@@ -27,31 +37,52 @@ Footer {
 }
 
 #server-card {
-    border: round #38bdf8;
+    border: round $border;
     border-title-color: #7dd3fc;
     border-title-style: bold;
     padding: 1 2;
     margin-bottom: 1;
-    background: #131726;
+    background: $surface-raised;
 }
 
 #accounts-table {
     height: 1fr;
-    border: round #a855f7;
-    border-title-color: #c084fc;
+    min-height: 8;
+    border: round $border;
+    border-title-color: #c4b5fd;
     border-title-style: bold;
-    background: #131726;
+    background: $surface;
     margin-bottom: 1;
 }
 
+#accounts-table:focus {
+    border: round #8b5cf6;
+}
+
 DataTable > .datatable--header {
-    background: #131726;
-    color: #64748b;
+    background: #1a2030;
+    color: #8f9bb2;
     text-style: bold;
 }
 
 DataTable > .datatable--cursor {
-    background: #1e2a45;
+    background: #202b45;
+    color: #f1f5ff;
+}
+
+DataTable > .datatable--hover {
+    background: #192238;
+}
+
+#account-details {
+    height: 8;
+    min-height: 8;
+    border: round $border;
+    border-title-color: #67e8f9;
+    border-title-style: bold;
+    background: $surface-raised;
+    padding: 1 2;
+    margin-bottom: 1;
 }
 
 /* ---- center: the big dashboard ---- */
@@ -62,11 +93,11 @@ DataTable > .datatable--cursor {
 
 #hero {
     height: 12;
-    border: round #6366f1;
+    border: round $border;
     border-title-color: #a5b4fc;
     border-title-style: bold;
     padding: 0 2;
-    background: #11142b;
+    background: #12162a;
     margin-bottom: 1;
     content-align: center middle;
     text-align: center;
@@ -80,8 +111,8 @@ DataTable > .datatable--cursor {
 .tile {
     width: 1fr;
     height: 100%;
-    border: round #1e293b;
-    background: #131726;
+    border: round $border;
+    background: $surface-raised;
     padding: 0 1;
     margin-right: 1;
     content-align: center middle;
@@ -94,10 +125,10 @@ DataTable > .datatable--cursor {
 
 #spark-card {
     height: 5;
-    border: round #06b6d4;
+    border: round $border;
     border-title-color: #67e8f9;
     border-title-style: bold;
-    background: #131726;
+    background: $surface;
     padding: 0 2;
     margin-bottom: 1;
     content-align: center middle;
@@ -109,51 +140,66 @@ DataTable > .datatable--cursor {
 
 #models-card {
     width: 1fr;
-    border: round #4ade80;
+    border: round $border;
     border-title-color: #86efac;
     border-title-style: bold;
-    background: #131726;
+    background: $surface;
     padding: 1 2;
     margin-right: 1;
 }
 
 #capacity-card {
     width: 1fr;
-    border: round #facc15;
+    border: round $border;
     border-title-color: #fde047;
     border-title-style: bold;
-    background: #131726;
+    background: $surface;
     padding: 1 2;
 }
 
 /* ---- right log column ---- */
 #right {
-    width: 40;
-    padding: 1 2 0 1;
+    width: 34;
+    padding: 1 1 0 1;
 }
 
 #log {
     height: 1fr;
-    border: round #475569;
+    overflow-x: hidden;
+    border: round $border;
     border-title-color: #94a3b8;
     border-title-style: bold;
     padding: 0 1;
-    background: #131726;
+    background: $surface;
     margin-bottom: 1;
 }
 
 /* ---- modal ---- */
-ApiKeyModal {
+ApiKeyModal, ConfirmDeleteModal {
     align: center middle;
-    background: rgba(10, 12, 20, 0.6);
+    background: rgba(10, 12, 20, 0.72);
 }
 
-#modal-box {
+#modal-box, #confirm-box {
     width: 66;
     height: auto;
     padding: 2 3;
-    border: thick #38bdf8;
-    background: #131726;
+    border: round #38bdf8;
+    background: #171c2b;
+}
+
+#confirm-box {
+    width: 58;
+    border: round #f87171;
+}
+
+#confirm-title {
+    margin-bottom: 1;
+}
+
+#confirm-copy {
+    color: #b9c2d6;
+    margin-bottom: 1;
 }
 
 #modal-box Input {
@@ -166,11 +212,75 @@ ApiKeyModal {
     border: tall #38bdf8;
 }
 
-#modal-buttons {
+#modal-buttons, #confirm-buttons {
     height: auto;
     margin-top: 1;
+    align-horizontal: right;
 }
 
-#modal-buttons Button {
-    margin-right: 1;
+#modal-buttons Button, #confirm-buttons Button {
+    margin-left: 1;
+}
+
+/* Responsive classes are applied by on_resize (TCSS has no media queries). */
+Screen.compact #left {
+    width: 50;
+    padding-left: 1;
+}
+
+Screen.compact #banner {
+    display: none;
+}
+
+Screen.compact #right {
+    display: block;
+    width: 30;
+    padding-right: 1;
+}
+
+Screen.compact #hero {
+    height: 9;
+}
+
+Screen.compact #models-card {
+    display: none;
+}
+
+Screen.compact #capacity-card {
+    width: 100%;
+}
+
+Screen.narrow #main {
+    layout: horizontal;
+    overflow: hidden hidden;
+}
+
+Screen.narrow #left {
+    width: 60%;
+    height: 100%;
+    padding: 1 1 0 1;
+}
+
+/* On very narrow terminals, prioritize controls/accounts and activity.
+   The analytics dashboard would force whole-screen scrolling, so it is
+   intentionally omitted rather than hidden below a scrollbar. */
+Screen.narrow #center {
+    display: none;
+}
+
+Screen.narrow #server-card {
+    height: 8;
+}
+
+Screen.narrow #account-details {
+    height: 9;
+    min-height: 9;
+    padding: 1;
+}
+
+Screen.narrow #right {
+    display: block;
+    width: 40%;
+    height: 100%;
+    padding: 1 1 0 0;
 }

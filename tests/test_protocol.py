@@ -1,8 +1,10 @@
+import socket
+
 from fastapi.testclient import TestClient
 
 from swapai import codex_client, config
 from swapai.accounts import Account
-from swapai.server import create_app
+from swapai.server import ServerThread, create_app
 
 
 def test_current_model_is_not_rewritten():
@@ -45,3 +47,18 @@ def test_health_endpoint():
     response = TestClient(create_app()).get("/health")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
+
+
+def test_server_thread_reports_real_listener(monkeypatch):
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    monkeypatch.setattr(config, "get_host", lambda: "127.0.0.1")
+    monkeypatch.setattr(config, "get_port", lambda: port)
+    server = ServerThread()
+    try:
+        server.start()
+        assert server.running
+    finally:
+        server.stop()
+    assert not server.running

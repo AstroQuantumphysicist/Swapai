@@ -33,7 +33,12 @@ def ensure_token(acc: Account) -> bool:
 
 
 def parse_rate_limits(headers: httpx.Headers, acc: Account) -> None:
-    """Read x-codex-* rate-limit headers into the account windows."""
+    """Read x-codex-* rate-limit headers into the account windows.
+
+    Defensive: if the backend sends a used_percent but omits window_minutes,
+    fall back to a sensible default (5h primary, 7d secondary) so the TUI
+    meter is still rendered instead of being hidden as "—".
+    """
     def f(name: str, default: float = 0.0) -> float:
         try:
             return float(headers.get(name, default))
@@ -42,24 +47,26 @@ def parse_rate_limits(headers: httpx.Headers, acc: Account) -> None:
 
     now = time.time()
     p_used = f("x-codex-primary-used-percent")
-    p_win = f("x-codex-primary-window-minutes")
+    p_win = f("x-codex-primary-window-minutes", 300)  # default 5h
     p_reset = f("x-codex-primary-reset-after-seconds")
-    if headers.get("x-codex-primary-used-percent") is not None:
+    if headers.get("x-codex-primary-used-percent") is not None or p_used > 0:
+        win = int(p_win) if p_win > 0 else 300
         acc.primary = RateWindow(
-            label=f"{int(p_win/60)}h" if p_win else "primary",
+            label=f"{int(win/60)}h" if win else "primary",
             used_percent=p_used,
-            window_minutes=int(p_win),
-            resets_at=now + p_reset if p_reset else 0.0,
+            window_minutes=win,
+            resets_at=now + p_reset if p_reset else acc.primary.resets_at,
         )
     s_used = f("x-codex-secondary-used-percent")
-    s_win = f("x-codex-secondary-window-minutes")
+    s_win = f("x-codex-secondary-window-minutes", 10080)  # default 7d weekly
     s_reset = f("x-codex-secondary-reset-after-seconds")
-    if headers.get("x-codex-secondary-used-percent") is not None:
+    if headers.get("x-codex-secondary-used-percent") is not None or s_used > 0:
+        win = int(s_win) if s_win > 0 else 10080
         acc.secondary = RateWindow(
-            label="weekly" if s_win >= 10000 else f"{int(s_win/60)}h",
+            label="weekly" if win >= 10000 else f"{int(win/60)}h",
             used_percent=s_used,
-            window_minutes=int(s_win),
-            resets_at=now + s_reset if s_reset else 0.0,
+            window_minutes=win,
+            resets_at=now + s_reset if s_reset else acc.secondary.resets_at,
         )
     # Flag account as limited if either window is exhausted. Only the reset
     # times of *exhausted* windows count toward how long we disable it, so a
@@ -98,7 +105,8 @@ def probe_models(acc: Account) -> list[str]:
     """Return the subset of candidate models that respond for this account."""
     if not ensure_token(acc):
         return []
-    available = []
+    available: list[str] = []
+    last_err: str = ""
     with httpx.Client(timeout=30) as client:
         for model in config.CANDIDATE_MODELS:
             payload = {
@@ -115,16 +123,71 @@ def probe_models(acc: Account) -> list[str]:
                     "POST", f"{config.CODEX_BASE_URL}/responses",
                     headers=_headers(acc), json=payload,
                 ) as resp:
-                    if resp.status_code in (200, 429):
+                    # Always parse rate-limit headers regardless of status.
+                    parse_rate_limits(resp.headers, acc)
+                    status = resp.status_code
+                    if status in (200, 429):
                         # 429 still proves the model is recognized.
-                        parse_rate_limits(resp.headers, acc)
                         available.append(model)
-                    resp.close()
-            except Exception:
+                    else:
+                        last_err = f"{model} -> HTTP {status}"
+                    # Drain the stream so the connection can be reused
+                    # and the server sees the request as fully consumed.
+                    try:
+                        for _ in resp.iter_lines():
+                            pass
+                    except Exception:
+                        pass
+            except Exception as exc:  # noqa: BLE001
+                last_err = f"{model} -> {exc}"
                 continue
     acc.models = available
     acc.save()
+    if not available and last_err:
+        acc.last_error = last_err
+        acc.save()
     return available
+
+
+def probe_limits(acc: Account) -> bool:
+    """Refresh rate-limit headers without probing every model.
+
+    Cheaper than `probe_models`: a single tiny request that we close as soon
+    as headers arrive. Returns True if any rate-limit info was observed.
+    """
+    if not ensure_token(acc):
+        return False
+    model = (acc.models[0] if acc.models
+             else config.CANDIDATE_MODELS[0])
+    try:
+        with httpx.Client(timeout=15) as client:
+            with client.stream(
+                "POST", f"{config.CODEX_BASE_URL}/responses",
+                headers=_headers(acc),
+                json={
+                    "model": model,
+                    "instructions": "ping",
+                    "input": _to_responses_input(
+                        [{"role": "user", "content": "."}]),
+                    "stream": True,
+                    "store": False,
+                    "max_output_tokens": 1,
+                },
+            ) as resp:
+                parse_rate_limits(resp.headers, acc)
+                try:
+                    for _ in resp.iter_lines():
+                        pass
+                except Exception:
+                    pass
+    except Exception as exc:  # noqa: BLE001
+        acc.last_error = f"probe_limits: {exc}"
+        acc.save()
+        return False
+    return (acc.primary.used_percent > 0
+            or acc.primary.window_minutes > 0
+            or acc.secondary.used_percent > 0
+            or acc.secondary.window_minutes > 0)
 
 
 def chat_completion(acc: Account, body: dict) -> tuple[dict, int]:

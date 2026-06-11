@@ -193,15 +193,26 @@ class SwapAIApp(App):
             except Exception:
                 pass
         table = self.query_one("#accounts-table", DataTable)
-        table.add_columns("", "Account", "Plan", "5h left", "Learned cap")
+        table.add_columns("", "Account", "Plan", "5h left", "Wk left",
+                           "Learned cap")
         self.log_line("[bold cyan]SwapAI online.[/bold cyan]")
+        self.log_line(f"[dim]data dir: {usage.data_dir()}[/dim]")
         self.log_line("[dim]a[/dim] add account · [dim]s[/dim] start server"
-                      " · [dim]k[/dim] API key")
+                      " · [dim]k[/dim] API key · [dim]r[/dim] refresh")
         if not config.get_api_key():
             self.log_line("[yellow]⚠ No API key — server would be OPEN. "
                           "Press k.[/yellow]")
         self.refresh_views()
-        self.set_interval(3, self.refresh_views)
+        # Re-render the dashboard 2×/sec for sparkline + timers.
+        self.set_interval(2, self.refresh_views)
+        # Periodically refresh rate-limit headers from the backend so the
+        # meters stay accurate even when no traffic is flowing. 60s is a
+        # good balance between freshness and not hammering the API.
+        self.set_interval(60, self._auto_refresh_limits)
+        # Kick off an initial probe in the background so the user sees
+        # limits and models as soon as the backend responds.
+        if accounts.list_accounts():
+            self._auto_refresh_limits()
 
     # ---- helpers -----------------------------------------------------
     def log_line(self, msg: str) -> None:
@@ -236,12 +247,21 @@ class SwapAIApp(App):
             cap = (f"[#4ade80]{_human(a.learned_tokens_per_5h)}[/]"
                    if a.learned_tokens_per_5h > 0
                    else "[dim italic]learning…[/dim italic]")
+            # Show the meter whenever we have *any* primary data; the
+            # backend sometimes sends used_percent without window_minutes.
+            has_prim = (a.primary.used_percent > 0
+                        or a.primary.window_minutes > 0)
+            has_sec = (a.secondary.used_percent > 0
+                       or a.secondary.window_minutes > 0)
             prim = (_meter(a.primary.remaining_percent, 8)
-                    if a.primary.window_minutes else "[dim]—[/dim]")
-            table.add_row(marker, a.email[:20], a.plan or "?", prim, cap,
-                          key=a.id)
+                    if has_prim else "[dim]probing…[/dim]")
+            sec = (_meter(a.secondary.remaining_percent, 8)
+                   if has_sec else "[dim]—[/dim]")
+            table.add_row(marker, a.email[:20], a.plan or "?", prim, sec,
+                          cap, key=a.id)
         if not accs:
-            table.add_row("", "[dim]none — press a to login[/dim]", "", "", "")
+            table.add_row("", "[dim]none — press a to login[/dim]", "", "",
+                          "", "")
 
     def _render_server_card(self) -> None:
         key = config.get_api_key()
@@ -422,6 +442,31 @@ class SwapAIApp(App):
                     self.log_line, f"[red]{a.email}: {exc}[/red]")
         self.call_from_thread(self.refresh_views)
         self.call_from_thread(self.log_line, "[#4ade80]✔ Limits updated.[/]")
+
+    @work(thread=True, exclusive=True)
+    def _auto_refresh_limits(self) -> None:
+        """Background refresh of rate-limit headers + token model list.
+
+        Runs on a 60s timer and once on startup. Uses the lightweight
+        `probe_limits` so we don't burn the model's output budget just to
+        read headers; falls back to a full `probe_models` if the account
+        has no known models yet.
+        """
+        any_pinged = False
+        for a in accounts.list_accounts():
+            try:
+                refresh_account(a)
+                if a.models:
+                    codex_client.probe_limits(a)
+                else:
+                    codex_client.probe_models(a)
+                any_pinged = True
+            except Exception as exc:  # noqa: BLE001
+                self.call_from_thread(
+                    self.log_line,
+                    f"[dim]{a.email}: refresh failed: {exc}[/dim]")
+        if any_pinged:
+            self.call_from_thread(self.refresh_views)
 
 
 def run() -> None:

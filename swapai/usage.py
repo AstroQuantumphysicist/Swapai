@@ -7,10 +7,16 @@ import math
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 from . import config
 
 _lock = threading.Lock()
+
+
+def data_dir() -> Path:
+    """Return the directory where SwapAI persists accounts and usage."""
+    return config.APP_DIR
 
 # ---------------------------------------------------------------------------
 # tiktoken counting (o200k_base = GPT-4o/GPT-5 family encoding)

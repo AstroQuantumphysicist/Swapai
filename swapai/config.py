@@ -12,6 +12,7 @@ from dotenv import load_dotenv, set_key
 APP_DIR = Path.home() / ".swapai"
 ACCOUNTS_DIR = APP_DIR / "accounts"
 USAGE_FILE = APP_DIR / "usage.jsonl"
+USAGE_STATE_FILE = APP_DIR / "usage.json"
 ENV_FILE = APP_DIR / ".env"
 
 # Codex CLI OAuth application (public client, PKCE flow)

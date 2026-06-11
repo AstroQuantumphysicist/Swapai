@@ -77,21 +77,106 @@ PLAN_TOKENS_PER_5H = {
 }
 DEFAULT_PLAN_TOKENS_PER_5H = 1_500_000
 PRIMARY_WINDOW_HOURS = 5
+WEEKLY_WINDOW_HOURS = 7 * 24
 
 
 def record(model: str, account_id: str, prompt_tokens: int,
            completion_tokens: int) -> None:
+    now = time.time()
+    prompt_tokens = int(prompt_tokens or 0)
+    completion_tokens = int(completion_tokens or 0)
     line = {
-        "t": time.time(),
+        "t": now,
         "model": model,
         "account": account_id,
-        "in": int(prompt_tokens or 0),
-        "out": int(completion_tokens or 0),
+        "in": prompt_tokens,
+        "out": completion_tokens,
     }
     with _lock:
         config.ensure_dirs()
+        state = _load_state_unlocked()
         with config.USAGE_FILE.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(line) + "\n")
+        state["requests"] = int(state.get("requests", 0)) + 1
+        state["input_tokens"] = int(
+            state.get("input_tokens", 0)) + prompt_tokens
+        state["output_tokens"] = int(
+            state.get("output_tokens", 0)) + completion_tokens
+        if not state.get("first_request_at"):
+            state["first_request_at"] = now
+        state["last_request_at"] = now
+        _increment_breakdown(
+            state.setdefault("models", {}), model or "?",
+            prompt_tokens, completion_tokens)
+        _increment_breakdown(
+            state.setdefault("accounts", {}), account_id or "?",
+            prompt_tokens, completion_tokens)
+        _save_state_unlocked(state)
+
+
+def _increment_breakdown(target: dict, key: str, input_tokens: int,
+                         output_tokens: int) -> None:
+    row = target.setdefault(
+        key, {"requests": 0, "input_tokens": 0, "output_tokens": 0})
+    row["requests"] = int(row.get("requests", 0)) + 1
+    row["input_tokens"] = int(row.get("input_tokens", 0)) + input_tokens
+    row["output_tokens"] = int(row.get("output_tokens", 0)) + output_tokens
+
+
+def _state_from_rows() -> dict:
+    rows = _read()
+    state = {
+        "version": 1,
+        "requests": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "first_request_at": 0.0,
+        "last_request_at": 0.0,
+        "models": {},
+        "accounts": {},
+    }
+    for row in rows:
+        when = float(row.get("t", 0) or 0)
+        tk_in = int(row.get("in", 0) or 0)
+        tk_out = int(row.get("out", 0) or 0)
+        state["requests"] += 1
+        state["input_tokens"] += tk_in
+        state["output_tokens"] += tk_out
+        if when and not state["first_request_at"]:
+            state["first_request_at"] = when
+        if when:
+            state["last_request_at"] = max(state["last_request_at"], when)
+        _increment_breakdown(
+            state["models"], row.get("model") or "?", tk_in, tk_out)
+        _increment_breakdown(
+            state["accounts"], row.get("account") or "?", tk_in, tk_out)
+    return state
+
+
+def _load_state_unlocked() -> dict:
+    if config.USAGE_STATE_FILE.exists():
+        try:
+            return json.loads(config.USAGE_STATE_FILE.read_text(
+                encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            pass
+    return _state_from_rows()
+
+
+def _save_state_unlocked(state: dict) -> None:
+    tmp = config.USAGE_STATE_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    tmp.replace(config.USAGE_STATE_FILE)
+
+
+def usage_state() -> dict:
+    """Return persistent lifetime totals and per-model/account breakdowns."""
+    with _lock:
+        state = _load_state_unlocked()
+        if not config.USAGE_STATE_FILE.exists():
+            config.ensure_dirs()
+            _save_state_unlocked(state)
+        return state
 
 
 def _read(since: float | None = None) -> list[dict]:
@@ -116,42 +201,98 @@ def _read(since: float | None = None) -> list[dict]:
 # ---------------------------------------------------------------------------
 # Capacity learning
 # ---------------------------------------------------------------------------
-# Below this used-percent the estimate is too quantization-noisy to trust.
-MIN_LEARN_PERCENT = 5.0
+# Primary usage moves quickly enough to wait for a stronger signal. Weekly
+# usage moves much more slowly, so one full percentage point is actionable.
+PRIMARY_MIN_LEARN_PERCENT = 5.0
+WEEKLY_MIN_LEARN_PERCENT = 1.0
+
+
+def observe_limit_baselines(acc) -> None:
+    """Anchor existing backend usage before counting local traffic."""
+    if acc.primary.window_minutes > 0 or acc.primary.used_percent > 0:
+        _observe_window_baseline(
+            acc, "calib", acc.primary.used_percent, acc.primary.resets_at)
+    if acc.secondary.window_minutes > 0 or acc.secondary.used_percent > 0:
+        _observe_window_baseline(
+            acc, "weekly", acc.secondary.used_percent,
+            acc.secondary.resets_at)
+
+
+def _observe_window_baseline(acc, prefix: str, used_percent: float,
+                             resets_at: float) -> None:
+    baseline_name = f"{prefix}_baseline_percent"
+    anchor_name = f"{prefix}_anchor_reset"
+    tokens_name = "window_tokens" if prefix == "calib" else (
+        "weekly_window_tokens")
+    last_name = "calib_last_percent" if prefix == "calib" else (
+        "weekly_last_percent")
+    baseline = getattr(acc, baseline_name)
+    anchor = getattr(acc, anchor_name)
+    last = getattr(acc, last_name)
+    rolled = (
+        baseline < 0
+        or used_percent < last - 1.0
+        or (anchor and resets_at and abs(resets_at - anchor) > 600)
+    )
+    if rolled:
+        setattr(acc, baseline_name, used_percent)
+        setattr(acc, anchor_name, resets_at)
+        setattr(acc, tokens_name, 0.0)
+        confidence = (
+            "calib_confidence_percent"
+            if prefix == "calib" else "weekly_confidence_percent")
+        setattr(acc, confidence, 0.0)
+    setattr(acc, last_name, used_percent)
+
+
+def learn_limits(acc, tokens: float) -> None:
+    """Learn both 5-hour and weekly token capacities from local traffic."""
+    _learn_window(
+        acc, "calib", tokens, acc.primary.used_percent,
+        acc.primary.resets_at, "learned_tokens_per_5h")
+    _learn_window(
+        acc, "weekly", tokens, acc.secondary.used_percent,
+        acc.secondary.resets_at, "learned_tokens_per_week")
+    acc.save()
+
+
+def _learn_window(acc, prefix: str, tokens: float, used_percent: float,
+                  resets_at: float, learned_name: str) -> None:
+    """Estimate capacity from usage growth after the persisted baseline.
+
+    If SwapAI starts when the backend is already at 20%, only movement beyond
+    that 20% is attributed to locally observed tokens.
+    """
+    _observe_window_baseline(acc, prefix, used_percent, resets_at)
+    tokens_name = "window_tokens" if prefix == "calib" else (
+        "weekly_window_tokens")
+    last_name = "calib_last_percent" if prefix == "calib" else (
+        "weekly_last_percent")
+    confidence_name = (
+        "calib_confidence_percent"
+        if prefix == "calib" else "weekly_confidence_percent")
+    baseline_name = f"{prefix}_baseline_percent"
+
+    tracked = getattr(acc, tokens_name) + max(0.0, tokens)
+    setattr(acc, tokens_name, tracked)
+    setattr(acc, last_name, used_percent)
+    delta = max(0.0, used_percent - getattr(acc, baseline_name))
+    threshold = (
+        PRIMARY_MIN_LEARN_PERCENT
+        if prefix == "calib" else WEEKLY_MIN_LEARN_PERCENT)
+    if delta >= threshold and tracked > 0:
+        estimate = tracked / (delta / 100.0)
+        if delta >= getattr(acc, confidence_name):
+            setattr(acc, learned_name, estimate)
+            setattr(acc, confidence_name, delta)
 
 
 def learn_capacity(acc, tokens: float, used_percent: float,
                    resets_at: float) -> None:
-    """Update an account's learned 5h token capacity from a real request.
-
-    We accumulate tiktoken-counted tokens consumed within the current primary
-    window and divide by the fraction of the limit reported used:
-        capacity ~= tokens_in_window / (used_percent / 100)
-    The estimate taken at the *highest* used-percent in a window is the most
-    accurate; hitting 100% yields the true capacity exactly.
-    """
-    prev = acc.calib_last_percent
-    window_rolled = (
-        used_percent < prev - 1.0
-        or (acc.calib_anchor_reset and resets_at
-            and abs(resets_at - acc.calib_anchor_reset) > 600)
-    )
-    if window_rolled:
-        acc.window_tokens = 0.0
-        acc.calib_confidence_percent = 0.0
-        acc.calib_anchor_reset = resets_at
-    if not acc.calib_anchor_reset and resets_at:
-        acc.calib_anchor_reset = resets_at
-
-    acc.window_tokens += max(0.0, tokens)
-    acc.calib_last_percent = used_percent
-
-    if used_percent >= MIN_LEARN_PERCENT and acc.window_tokens > 0:
-        est = acc.window_tokens / (used_percent / 100.0)
-        # Keep the estimate observed at the highest used-percent this window.
-        if used_percent >= acc.calib_confidence_percent:
-            acc.learned_tokens_per_5h = est
-            acc.calib_confidence_percent = used_percent
+    """Backward-compatible primary-window learner."""
+    _learn_window(
+        acc, "calib", tokens, used_percent, resets_at,
+        "learned_tokens_per_5h")
     acc.save()
 
 
@@ -218,15 +359,15 @@ def stats_last_hours(hours: float = 1.0) -> UsageStats:
 
 
 def lifetime_stats() -> UsageStats:
-    rows = _read()
-    if not rows:
+    state = usage_state()
+    if not state.get("requests"):
         return UsageStats()
-    first = min(r["t"] for r in rows)
+    first = float(state.get("first_request_at", 0) or time.time())
     span = max((time.time() - first) / 3600, 1 / 60)
     return UsageStats(
-        requests=len(rows),
-        input_tokens=sum(r.get("in", 0) for r in rows),
-        output_tokens=sum(r.get("out", 0) for r in rows),
+        requests=int(state.get("requests", 0)),
+        input_tokens=int(state.get("input_tokens", 0)),
+        output_tokens=int(state.get("output_tokens", 0)),
         span_hours=span,
     )
 
@@ -274,7 +415,8 @@ class SubscriptionPlan:
 
 
 def subscriptions_needed(accounts_plans, tokens_per_hour: float,
-                         learned_caps: list[float] | None = None
+                         learned_caps: list[float] | None = None,
+                         weekly_caps: list[float] | None = None
                          ) -> SubscriptionPlan:
     """Compute subs needed for 24/7.
 
@@ -291,7 +433,17 @@ def subscriptions_needed(accounts_plans, tokens_per_hour: float,
             lc = learned_caps[i] or 0.0
         if lc > 0:
             any_learned = True
-        caps5h.append(effective_tokens_per_5h(p, lc))
+        primary_hour = effective_tokens_per_5h(p, lc) / PRIMARY_WINDOW_HOURS
+        weekly = 0.0
+        if weekly_caps and i < len(weekly_caps):
+            weekly = weekly_caps[i] or 0.0
+        weekly_hour = weekly / WEEKLY_WINDOW_HOURS if weekly > 0 else 0.0
+        effective_hour = (
+            min(primary_hour, weekly_hour) if weekly_hour > 0
+            else primary_hour)
+        caps5h.append(effective_hour * PRIMARY_WINDOW_HOURS)
+        if weekly > 0:
+            any_learned = True
 
     if not plans:
         caps5h = [effective_tokens_per_5h("plus")]

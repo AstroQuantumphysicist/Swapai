@@ -67,6 +67,13 @@ class Account:
     calib_last_percent: float = 0.0     # last observed primary used-percent
     calib_confidence_percent: float = 0.0  # used-% at which estimate was taken
     calib_anchor_reset: float = 0.0     # resets_at we're tracking the window by
+    calib_baseline_percent: float = -1.0  # used-% before locally tracked traffic
+    weekly_window_tokens: float = 0.0
+    learned_tokens_per_week: float = 0.0
+    weekly_last_percent: float = 0.0
+    weekly_confidence_percent: float = 0.0
+    weekly_anchor_reset: float = 0.0
+    weekly_baseline_percent: float = -1.0
 
     # ---- persistence -------------------------------------------------
     @property

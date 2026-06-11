@@ -102,5 +102,9 @@ pi --provider swapai --model gpt-5.4
   response headers. The **token allowances** used for 24/7 planning are
   heuristics (ChatGPT does not publish exact token caps) and live in
   `swapai/usage.py` (`PLAN_TOKENS_PER_5H`) if you want to tune them.
+- Lifetime request/token totals and per-model/per-account totals are persisted
+  in `~/.swapai/usage.json`. Individual request history remains in
+  `~/.swapai/usage.jsonl`, while learned 5-hour and weekly capacities are
+  saved in each account file under `~/.swapai/accounts/`.
 - This uses the public Codex CLI OAuth client and the ChatGPT backend the same
   way the official Codex CLI does. Respect OpenAI's terms of use.

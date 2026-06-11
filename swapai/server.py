@@ -15,6 +15,42 @@ from . import config, codex_client, usage
 from .router import router
 
 
+class _ResponsesUsageTracker:
+    """Inspect copied SSE bytes without changing the client stream."""
+
+    def __init__(self) -> None:
+        self._buffer = b""
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self.completed = False
+
+    def feed(self, chunk: bytes) -> None:
+        self._buffer += chunk
+        while b"\n" in self._buffer:
+            line, self._buffer = self._buffer.split(b"\n", 1)
+            self._parse_line(line.rstrip(b"\r"))
+
+    def finish(self) -> None:
+        if self._buffer:
+            self._parse_line(self._buffer.rstrip(b"\r"))
+            self._buffer = b""
+
+    def _parse_line(self, line: bytes) -> None:
+        if not line.startswith(b"data:"):
+            return
+        try:
+            event = json.loads(line[5:].strip())
+        except (ValueError, UnicodeDecodeError):
+            return
+        if event.get("type") != "response.completed":
+            return
+        response = event.get("response", {}) or {}
+        token_usage = response.get("usage", {}) or {}
+        self.input_tokens = int(token_usage.get("input_tokens", 0) or 0)
+        self.output_tokens = int(token_usage.get("output_tokens", 0) or 0)
+        self.completed = True
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="SwapAI", version="0.1.0")
 
@@ -100,13 +136,22 @@ def create_app() -> FastAPI:
                             detail=f"All accounts exhausted: {last_err}")
 
     async def relay_response(upstream: httpx.Response,
-                             client: httpx.AsyncClient):
+                             client: httpx.AsyncClient, acc, body: dict):
+        tracker = _ResponsesUsageTracker()
         try:
             async for chunk in upstream.aiter_bytes():
+                tracker.feed(chunk)
                 yield chunk
         finally:
+            tracker.finish()
             await upstream.aclose()
             await client.aclose()
+            if tracker.completed:
+                usage.record(
+                    body.get("model", ""), acc.id,
+                    tracker.input_tokens, tracker.output_tokens)
+                usage.learn_limits(
+                    acc, tracker.input_tokens + tracker.output_tokens)
 
     @app.post("/responses")
     @app.post("/codex/responses")
@@ -180,7 +225,7 @@ def create_app() -> FastAPI:
                 acc.last_error = ""
                 acc.save()
             return StreamingResponse(
-                relay_response(upstream, client),
+                relay_response(upstream, client, acc, body),
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",

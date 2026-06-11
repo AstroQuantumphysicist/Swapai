@@ -138,6 +138,12 @@ def parse_rate_limits(headers: httpx.Headers, acc: Account) -> None:
         exhausted_resets.append(acc.secondary.resets_at or now + 300)
     if exhausted_resets:
         acc.disabled_until = max(exhausted_resets)
+    else:
+        # A persisted 100% state must not keep the account disabled after
+        # the backend reports that both windows have reset.
+        acc.disabled_until = 0.0
+    from . import usage
+    usage.observe_limit_baselines(acc)
     acc.save()
 
 

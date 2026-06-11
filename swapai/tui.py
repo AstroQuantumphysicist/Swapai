@@ -194,7 +194,7 @@ class SwapAIApp(App):
                 pass
         table = self.query_one("#accounts-table", DataTable)
         table.add_columns("", "Account", "Plan", "5h left", "Wk left",
-                           "Learned cap")
+                          "Learned caps")
         self.log_line("[bold cyan]SwapAI online.[/bold cyan]")
         self.log_line(f"[dim]data dir: {usage.data_dir()}[/dim]")
         self.log_line("[dim]a[/dim] add account · [dim]s[/dim] start server"
@@ -244,9 +244,15 @@ class SwapAIApp(App):
             marker = ("[#4ade80]▶[/]" if active else
                       "[#f87171]■[/]" if a.is_rate_limited else
                       "[#64748b]·[/]")
-            cap = (f"[#4ade80]{_human(a.learned_tokens_per_5h)}[/]"
-                   if a.learned_tokens_per_5h > 0
-                   else "[dim italic]learning…[/dim italic]")
+            cap5 = (
+                f"{_human(a.learned_tokens_per_5h)} "
+                f"({_human(a.learned_tokens_per_5h * a.primary.remaining_percent / 100)} left)"
+                if a.learned_tokens_per_5h > 0 else "learning")
+            capw = (
+                f"{_human(a.learned_tokens_per_week)} "
+                f"({_human(a.learned_tokens_per_week * a.secondary.remaining_percent / 100)} left)"
+                if a.learned_tokens_per_week > 0 else "learning")
+            cap = f"[#4ade80]5h {cap5} / wk {capw}[/]"
             # Show the meter whenever we have *any* primary data; the
             # backend sometimes sends used_percent without window_minutes.
             has_prim = (a.primary.used_percent > 0
@@ -341,7 +347,9 @@ class SwapAIApp(App):
 
         plans = [a.plan for a in router.accounts]
         learned = [a.learned_tokens_per_5h for a in router.accounts]
-        sub = usage.subscriptions_needed(plans, hour.tokens_per_hour, learned)
+        weekly = [a.learned_tokens_per_week for a in router.accounts]
+        sub = usage.subscriptions_needed(
+            plans, hour.tokens_per_hour, learned, weekly)
         sustain = ("[#4ade80 b]✔ SUSTAINABLE[/]" if sub.sustainable
                    else "[#f87171 b]✘ NOT SUSTAINABLE[/]")
         src = ("[#4ade80]tiktoken-learned[/]" if sub.learned

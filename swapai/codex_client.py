@@ -12,7 +12,7 @@ from . import config
 from .accounts import Account, RateWindow, refresh_account
 
 
-def _headers(acc: Account) -> dict:
+def upstream_headers(acc: Account) -> dict:
     # Mirrors the official Codex CLI request shape. The backend rejects
     # requests that don't carry the `{originator}/{version}` User-Agent
     # plus the matching `version` header, so both must be set.
@@ -42,11 +42,8 @@ def normalize_model(requested: str) -> str:
     if not r:
         return config.DEFAULT_CODEX_MODEL
     lower = r.lower()
-    if ("codex" in lower
-            or lower == config.DEFAULT_CODEX_MODEL
-            or lower.startswith("gpt-5.4")
-            or lower.startswith("gpt-5.3")
-            or lower.startswith("gpt-5.2")):
+    known = {model.lower() for model in config.CANDIDATE_MODELS}
+    if lower in known or "codex" in lower or lower.startswith("gpt-5."):
         return r
     return config.DEFAULT_CODEX_MODEL
 
@@ -70,8 +67,22 @@ def _base_payload(model: str, instructions: str, input_items: list[dict],
         "tool_choice": "auto",
         "parallel_tool_calls": True,
     }
-    if max_output_tokens is not None:
-        payload["max_output_tokens"] = int(max_output_tokens)
+    return payload
+
+
+def prepare_responses_payload(body: dict) -> dict:
+    """Adapt an OpenAI/Codex Responses request for the ChatGPT backend."""
+    payload = dict(body)
+    payload["model"] = normalize_model(payload.get("model", ""))
+    payload["stream"] = True
+    payload["store"] = False
+    payload.setdefault("instructions", "You are a helpful assistant.")
+    payload.setdefault("input", [])
+    payload.setdefault("include", ["reasoning.encrypted_content"])
+    payload.setdefault("tool_choice", "auto")
+    payload.setdefault("parallel_tool_calls", True)
+    # ChatGPT Codex currently rejects this public Responses API field.
+    payload.pop("max_output_tokens", None)
     return payload
 
 
@@ -166,7 +177,7 @@ def probe_models(acc: Account) -> list[str]:
             try:
                 with client.stream(
                     "POST", f"{config.CODEX_BASE_URL}/responses",
-                    headers=_headers(acc), json=payload,
+                    headers=upstream_headers(acc), json=payload,
                 ) as resp:
                     # Always parse rate-limit headers regardless of status.
                     parse_rate_limits(resp.headers, acc)
@@ -187,6 +198,8 @@ def probe_models(acc: Account) -> list[str]:
                 last_err = f"{model} -> {exc}"
                 continue
     acc.models = available
+    if available:
+        acc.last_error = ""
     acc.save()
     if not available and last_err:
         acc.last_error = last_err
@@ -208,7 +221,7 @@ def probe_limits(acc: Account) -> bool:
         with httpx.Client(timeout=15) as client:
             with client.stream(
                 "POST", f"{config.CODEX_BASE_URL}/responses",
-                headers=_headers(acc),
+                headers=upstream_headers(acc),
                 json=_base_payload(
                     model, "ping",
                     _to_responses_input(
@@ -251,7 +264,7 @@ def chat_completion(acc: Account, body: dict) -> tuple[dict, int]:
     status = 200
     with httpx.Client(timeout=180) as client:
         with client.stream("POST", f"{config.CODEX_BASE_URL}/responses",
-                           headers=_headers(acc), json=payload) as resp:
+                           headers=upstream_headers(acc), json=payload) as resp:
             parse_rate_limits(resp.headers, acc)
             status = resp.status_code
             if status != 200:

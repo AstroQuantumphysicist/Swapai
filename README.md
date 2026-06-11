@@ -17,7 +17,8 @@ account failover, per-subscription limit tracking, and token-usage analytics.
 
 - **Multi-account Codex OAuth login** — add as many ChatGPT accounts as you
   want; each is saved separately under `~/.swapai/accounts/`.
-- **OpenAI-compatible server** — `/v1/chat/completions` and `/v1/models`,
+- **OpenAI-compatible server** — `/v1/chat/completions`, `/v1/responses`, and
+  `/v1/models`,
   exposed on the network (`0.0.0.0` by default) and protected by an API key
   that you set in the TUI and that is saved to `~/.swapai/.env`.
 - **Common-model detection** — probes each account and serves only the models
@@ -59,7 +60,40 @@ swapai serve      # headless: just run the API server
 curl http://<host>:8788/v1/chat/completions \
   -H "Authorization: Bearer $SWAPAI_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"model":"gpt-5.1","messages":[{"role":"user","content":"Hi"}]}'
+  -d '{"model":"gpt-5.4","messages":[{"role":"user","content":"Hi"}]}'
+```
+
+### Use with Pi
+
+Add this provider to `~/.pi/agent/models.json`:
+
+```json
+{
+  "providers": {
+    "swapai": {
+      "baseUrl": "http://127.0.0.1:8788/v1",
+      "api": "openai-responses",
+      "apiKey": "unused",
+      "models": [
+        {
+          "id": "gpt-5.4",
+          "name": "GPT-5.4 via SwapAI",
+          "reasoning": true,
+          "input": ["text", "image"],
+          "contextWindow": 272000,
+          "maxTokens": 128000
+        }
+      ]
+    }
+  }
+}
+```
+
+When `SWAPAI_API_KEY` is configured, replace `"unused"` with that key. Then:
+
+```powershell
+swapai serve
+pi --provider swapai --model gpt-5.4
 ```
 
 ## Notes

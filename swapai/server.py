@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 
+import httpx
 import uvicorn
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from . import config, codex_client, usage
 from .router import router
@@ -96,6 +98,100 @@ def create_app() -> FastAPI:
             return resp
         raise HTTPException(status_code=503,
                             detail=f"All accounts exhausted: {last_err}")
+
+    async def relay_response(upstream: httpx.Response,
+                             client: httpx.AsyncClient):
+        try:
+            async for chunk in upstream.aiter_bytes():
+                yield chunk
+        finally:
+            await upstream.aclose()
+            await client.aclose()
+
+    @app.post("/responses")
+    @app.post("/codex/responses")
+    @app.post("/v1/responses")
+    @app.post("/v1/codex/responses")
+    async def responses(request: Request,
+                        authorization: str | None = Header(default=None)):
+        """Stream the native Codex Responses protocol used by Pi and Codex."""
+        check_auth(authorization)
+        body = codex_client.prepare_responses_payload(await request.json())
+        router.reload()
+
+        attempts = max(1, len(router.accounts))
+        last_err = "no accounts configured"
+        for _ in range(attempts):
+            acc = router.active_account()
+            if acc is None:
+                break
+            if not codex_client.ensure_token(acc):
+                last_err = acc.last_error or "token refresh failed"
+                router.mark_limited(acc)
+                continue
+
+            client = httpx.AsyncClient(
+                timeout=httpx.Timeout(300, connect=30),
+                follow_redirects=True,
+            )
+            try:
+                upstream = await client.send(
+                    client.build_request(
+                        "POST",
+                        f"{config.CODEX_BASE_URL}/responses",
+                        headers=codex_client.upstream_headers(acc),
+                        json=body,
+                    ),
+                    stream=True,
+                )
+                codex_client.parse_rate_limits(upstream.headers, acc)
+            except Exception as exc:  # noqa: BLE001
+                await client.aclose()
+                acc.last_error = str(exc)
+                acc.save()
+                router.mark_limited(acc)
+                last_err = str(exc)
+                continue
+
+            if upstream.status_code == 429:
+                detail = (await upstream.aread()).decode("utf-8", "replace")
+                await upstream.aclose()
+                await client.aclose()
+                router.mark_limited(acc)
+                last_err = detail or "rate limited"
+                continue
+
+            if upstream.status_code >= 400:
+                raw = (await upstream.aread()).decode("utf-8", "replace")
+                await upstream.aclose()
+                await client.aclose()
+                acc.last_error = raw
+                acc.save()
+                try:
+                    content = json.loads(raw)
+                except ValueError:
+                    content = {"error": {"message": raw or "upstream error"}}
+                return JSONResponse(
+                    status_code=upstream.status_code,
+                    content=content,
+                )
+
+            if acc.last_error:
+                acc.last_error = ""
+                acc.save()
+            return StreamingResponse(
+                relay_response(upstream, client),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+
+        raise HTTPException(
+            status_code=503,
+            detail=f"No available Codex account: {last_err}",
+        )
 
     return app
 

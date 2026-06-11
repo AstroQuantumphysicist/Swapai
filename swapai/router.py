@@ -24,9 +24,12 @@ class Router:
 
     def common_models(self) -> list[str]:
         """Models available across ALL logged-in accounts (intersection)."""
-        accs = [a for a in self.accounts if a.models]
+        accs = [a for a in self.accounts if a.access_token]
         if not accs:
             return []
+        if any(not a.models for a in accs):
+            from .config import CANDIDATE_MODELS
+            return list(CANDIDATE_MODELS)
         common = set(accs[0].models)
         for a in accs[1:]:
             common &= set(a.models)

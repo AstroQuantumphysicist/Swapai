@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import secrets
 from pathlib import Path
@@ -26,23 +27,37 @@ CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 # follow the `{originator}/{version}` format or the backend rejects the
 # request. Bump this when the wire format changes.
 CODEX_ORIGINATOR = "codex_cli_rs"
-CODEX_CLIENT_VERSION = "0.1.0"
+CODEX_CLIENT_VERSION = os.environ.get("SWAPAI_CODEX_CLIENT_VERSION", "0.133.0")
 
 # Default Codex-compatible model. The backend will accept a request for
 # any string, but unknown names silently get mapped to a default — use
 # this explicitly so the user sees the real model name in the dashboard.
-DEFAULT_CODEX_MODEL = "gpt-5.1"
+DEFAULT_CODEX_MODEL = "gpt-5.4"
+
+
+def _candidate_models() -> list[str]:
+    """Use the installed Codex model cache, with a current fallback list."""
+    cache = Path.home() / ".codex" / "models_cache.json"
+    try:
+        data = json.loads(cache.read_text(encoding="utf-8"))
+        rows = data.get("models", data) if isinstance(data, dict) else data
+        models = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            model = row.get("slug") or row.get("id") or row.get("model")
+            if model and model not in models:
+                models.append(model)
+        if models:
+            return models
+    except (OSError, ValueError, TypeError):
+        pass
+    return ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"]
+
 
 # Candidate models probed per account; only the intersection across all
 # accounts is exposed through the router.
-CANDIDATE_MODELS = [
-    "gpt-5",
-    "gpt-5-codex",
-    "gpt-5.1",
-    "gpt-5.1-codex",
-    "gpt-5.1-codex-mini",
-    "codex-mini-latest",
-]
+CANDIDATE_MODELS = _candidate_models()
 
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8788

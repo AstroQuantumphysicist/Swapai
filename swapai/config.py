@@ -22,6 +22,17 @@ OAUTH_SCOPES = "openid profile email offline_access"
 
 CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 
+# Mirrors the official Codex CLI: User-Agent and `version` header must
+# follow the `{originator}/{version}` format or the backend rejects the
+# request. Bump this when the wire format changes.
+CODEX_ORIGINATOR = "codex_cli_rs"
+CODEX_CLIENT_VERSION = "0.1.0"
+
+# Default Codex-compatible model. The backend will accept a request for
+# any string, but unknown names silently get mapped to a default — use
+# this explicitly so the user sees the real model name in the dashboard.
+DEFAULT_CODEX_MODEL = "gpt-5.1"
+
 # Candidate models probed per account; only the intersection across all
 # accounts is exposed through the router.
 CANDIDATE_MODELS = [

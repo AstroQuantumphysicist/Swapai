@@ -13,17 +13,66 @@ from .accounts import Account, RateWindow, refresh_account
 
 
 def _headers(acc: Account) -> dict:
+    # Mirrors the official Codex CLI request shape. The backend rejects
+    # requests that don't carry the `{originator}/{version}` User-Agent
+    # plus the matching `version` header, so both must be set.
+    version = config.CODEX_CLIENT_VERSION
+    originator = config.CODEX_ORIGINATOR
     h = {
         "Authorization": f"Bearer {acc.access_token}",
         "Content-Type": "application/json",
-        "OpenAI-Beta": "responses=experimental",
-        "originator": "codex_cli_rs",
-        "User-Agent": "swapai/0.1 (codex-router)",
+        "originator": originator,
+        "version": version,
+        "User-Agent": f"{originator}/{version}",
         "session_id": str(uuid.uuid4()),
     }
     if acc.account_id:
         h["chatgpt-account-id"] = acc.account_id
     return h
+
+
+def normalize_model(requested: str) -> str:
+    """Map any requested model name to a Codex-compatible one.
+
+    The backend silently coerces unknown models to a default; this helper
+    makes the coercion explicit and keeps the dashboard honest. Mirrors
+    the `normalize_codex_compat_model` logic from the Rust reference.
+    """
+    r = (requested or "").strip()
+    if not r:
+        return config.DEFAULT_CODEX_MODEL
+    lower = r.lower()
+    if ("codex" in lower
+            or lower == config.DEFAULT_CODEX_MODEL
+            or lower.startswith("gpt-5.4")
+            or lower.startswith("gpt-5.3")
+            or lower.startswith("gpt-5.2")):
+        return r
+    return config.DEFAULT_CODEX_MODEL
+
+
+def _base_payload(model: str, instructions: str, input_items: list[dict],
+                  max_output_tokens: int | None = None) -> dict:
+    """Build the canonical Codex 'responses' payload.
+
+    These extra fields (`include`, `tools`, `tool_choice`,
+    `parallel_tool_calls`) are required by the backend; without them the
+    request is rejected with a 4xx.
+    """
+    payload: dict = {
+        "model": normalize_model(model),
+        "instructions": instructions or "You are a helpful assistant.",
+        "input": input_items,
+        "stream": True,
+        "store": False,
+        "include": ["reasoning.encrypted_content"],
+        "tools": [],
+        "tool_choice": "auto",
+        "parallel_tool_calls": True,
+    }
+    if max_output_tokens is not None:
+        payload["max_output_tokens"] = int(max_output_tokens)
+    return payload
 
 
 def ensure_token(acc: Account) -> bool:
@@ -109,15 +158,11 @@ def probe_models(acc: Account) -> list[str]:
     last_err: str = ""
     with httpx.Client(timeout=30) as client:
         for model in config.CANDIDATE_MODELS:
-            payload = {
-                "model": model,
-                "instructions": "ping",
-                "input": _to_responses_input(
-                    [{"role": "user", "content": "ping"}]),
-                "stream": True,
-                "store": False,
-                "max_output_tokens": 16,
-            }
+            payload = _base_payload(
+                model, "ping",
+                _to_responses_input([{"role": "user", "content": "ping"}]),
+                max_output_tokens=16,
+            )
             try:
                 with client.stream(
                     "POST", f"{config.CODEX_BASE_URL}/responses",
@@ -157,22 +202,19 @@ def probe_limits(acc: Account) -> bool:
     """
     if not ensure_token(acc):
         return False
-    model = (acc.models[0] if acc.models
-             else config.CANDIDATE_MODELS[0])
+    candidates = acc.models or config.CANDIDATE_MODELS or [config.DEFAULT_CODEX_MODEL]
+    model = candidates[0]
     try:
         with httpx.Client(timeout=15) as client:
             with client.stream(
                 "POST", f"{config.CODEX_BASE_URL}/responses",
                 headers=_headers(acc),
-                json={
-                    "model": model,
-                    "instructions": "ping",
-                    "input": _to_responses_input(
+                json=_base_payload(
+                    model, "ping",
+                    _to_responses_input(
                         [{"role": "user", "content": "."}]),
-                    "stream": True,
-                    "store": False,
-                    "max_output_tokens": 1,
-                },
+                    max_output_tokens=1,
+                ),
             ) as resp:
                 parse_rate_limits(resp.headers, acc)
                 try:
@@ -194,18 +236,15 @@ def chat_completion(acc: Account, body: dict) -> tuple[dict, int]:
     """Non-streaming chat completion. Returns (openai_response, status)."""
     if not ensure_token(acc):
         return {"error": {"message": "token refresh failed"}}, 401
-    model = body.get("model", "gpt-5.1")
+    model = body.get("model", config.DEFAULT_CODEX_MODEL)
     messages = body.get("messages", [])
-    payload = {
-        "model": model,
-        "instructions": _system_instructions(messages),
-        "input": _to_responses_input(
+    payload = _base_payload(
+        model,
+        _system_instructions(messages),
+        _to_responses_input(
             [m for m in messages if m.get("role") != "system"]),
-        "stream": True,
-        "store": False,
-    }
-    if body.get("max_tokens"):
-        payload["max_output_tokens"] = body["max_tokens"]
+        max_output_tokens=body.get("max_tokens"),
+    )
 
     text_parts: list[str] = []
     usage = {"input_tokens": 0, "output_tokens": 0}

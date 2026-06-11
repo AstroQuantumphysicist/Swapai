@@ -1,0 +1,176 @@
+Screen {
+    background: #0f1117;
+}
+
+Header {
+    background: #131726;
+    color: #7dd3fc;
+}
+
+Footer {
+    background: #131726;
+}
+
+#main {
+    height: 1fr;
+}
+
+/* ---- left control column ---- */
+#left {
+    width: 49;
+    padding: 1 1 0 2;
+}
+
+#banner {
+    height: auto;
+    margin-bottom: 1;
+}
+
+#server-card {
+    border: round #38bdf8;
+    border-title-color: #7dd3fc;
+    border-title-style: bold;
+    padding: 1 2;
+    margin-bottom: 1;
+    background: #131726;
+}
+
+#accounts-table {
+    height: 1fr;
+    border: round #a855f7;
+    border-title-color: #c084fc;
+    border-title-style: bold;
+    background: #131726;
+    margin-bottom: 1;
+}
+
+DataTable > .datatable--header {
+    background: #131726;
+    color: #64748b;
+    text-style: bold;
+}
+
+DataTable > .datatable--cursor {
+    background: #1e2a45;
+}
+
+/* ---- center: the big dashboard ---- */
+#center {
+    width: 1fr;
+    padding: 1 1 0 1;
+}
+
+#hero {
+    height: 12;
+    border: round #6366f1;
+    border-title-color: #a5b4fc;
+    border-title-style: bold;
+    padding: 0 2;
+    background: #11142b;
+    margin-bottom: 1;
+    content-align: center middle;
+    text-align: center;
+}
+
+#tiles {
+    height: 5;
+    margin-bottom: 1;
+}
+
+.tile {
+    width: 1fr;
+    height: 100%;
+    border: round #1e293b;
+    background: #131726;
+    padding: 0 1;
+    margin-right: 1;
+    content-align: center middle;
+    text-align: center;
+}
+
+.tile:hover {
+    border: round #38bdf8;
+}
+
+#spark-card {
+    height: 5;
+    border: round #06b6d4;
+    border-title-color: #67e8f9;
+    border-title-style: bold;
+    background: #131726;
+    padding: 0 2;
+    margin-bottom: 1;
+    content-align: center middle;
+}
+
+#dash-bottom {
+    height: 1fr;
+}
+
+#models-card {
+    width: 1fr;
+    border: round #4ade80;
+    border-title-color: #86efac;
+    border-title-style: bold;
+    background: #131726;
+    padding: 1 2;
+    margin-right: 1;
+}
+
+#capacity-card {
+    width: 1fr;
+    border: round #facc15;
+    border-title-color: #fde047;
+    border-title-style: bold;
+    background: #131726;
+    padding: 1 2;
+}
+
+/* ---- right log column ---- */
+#right {
+    width: 40;
+    padding: 1 2 0 1;
+}
+
+#log {
+    height: 1fr;
+    border: round #475569;
+    border-title-color: #94a3b8;
+    border-title-style: bold;
+    padding: 0 1;
+    background: #131726;
+    margin-bottom: 1;
+}
+
+/* ---- modal ---- */
+ApiKeyModal {
+    align: center middle;
+    background: rgba(10, 12, 20, 0.6);
+}
+
+#modal-box {
+    width: 66;
+    height: auto;
+    padding: 2 3;
+    border: thick #38bdf8;
+    background: #131726;
+}
+
+#modal-box Input {
+    margin-top: 1;
+    background: #0f1117;
+    border: tall #334155;
+}
+
+#modal-box Input:focus {
+    border: tall #38bdf8;
+}
+
+#modal-buttons {
+    height: auto;
+    margin-top: 1;
+}
+
+#modal-buttons Button {
+    margin-right: 1;
+}
